@@ -3,16 +3,23 @@
 import datetime
 import json
 import logging
-from typing import Iterable, Tuple, Union
+from typing import Iterable, Optional, Tuple, Union
 from urllib.parse import urlencode
 
 import networkx as nx
 import numpy as np
 import pandas as pd
 import pytz
+from packaging.version import Version
 
 from .auth import AuthClient
-from .base import BaseEncoder, ClientBase, _api_endpoints, handle_response
+from .base import (
+    BaseEncoder,
+    ClientBase,
+    _api_endpoints,
+    _check_version_compatibility,
+    handle_response,
+)
 from .endpoints import (
     chunkedgraph_api_versions,
     chunkedgraph_endpoints_common,
@@ -183,6 +190,7 @@ class ChunkedGraphClientV1(ClientBase):
         self._default_timestamp = timestamp
         self._table_name = table_name
         self._segmentation_info = None
+        self._server_version = self._get_server_version()
 
     @property
     def default_url_mapping(self):
@@ -191,6 +199,34 @@ class ChunkedGraphClientV1(ClientBase):
     @property
     def table_name(self):
         return self._table_name
+
+    # TODO refactor to base client
+    def _get_server_version(self) -> Optional[Version]:
+        endpoint_mapping = self.default_url_mapping
+        url = self._endpoints["get_current_semver"].format_map(endpoint_mapping)
+        response = self.session.get(url)
+        print(url)
+        if response.status_code == 404:  # server doesn't have this endpoint yet
+            return None
+        else:
+            version_str = response.json()
+            print(response.json())
+            print(response)
+            version = Version(version_str)
+            return version
+
+    @property
+    def server_version(self) -> Optional[Version]:
+        return self._server_version
+
+    @property
+    def max_server_version(self) -> Version:
+        """Old versions of the server will not even have the endpoint to know"""
+        if self._server_version is None:
+            # this is the last version that doesn't have the endpoints
+            return Version("2.15.0")
+        else:
+            return self._server_version
 
     def _process_timestamp(self, timestamp):
         """Process timestamp with default logic"""
@@ -775,6 +811,7 @@ class ChunkedGraphClientV1(ClientBase):
         rd = handle_response(response)
         return np.int64(rd["nodes"]), np.double(rd["affinities"]), np.int32(rd["areas"])
 
+    @_check_version_compatibility(kwarg_use_constraints={"bounds": ">=2.15.0"})
     def level2_chunk_graph(self, root_id, bounds=None) -> list:
         """
         Get graph of level 2 chunks, the smallest agglomeration level above supervoxels.
@@ -811,6 +848,8 @@ class ChunkedGraphClientV1(ClientBase):
 
         r = handle_response(response)
 
+        # TODO in theory, could remove this check if we are confident in the server
+        # version fix
         used_bounds = response.headers.get("Used-Bounds")
         used_bounds = used_bounds == "true" or used_bounds == "True"
         if bounds is not None and not used_bounds:

@@ -1,12 +1,17 @@
 import datetime
 import json
 import logging
+import textwrap
 import urllib
 import webbrowser
+from functools import wraps
+from typing import Callable
 
 import numpy as np
 import pandas as pd
 import requests
+from packaging.specifiers import SpecifierSet
+from packaging.version import Version
 
 from .session_config import patch_session
 
@@ -299,3 +304,97 @@ class ClientBaseWithDatastack(ClientBase):
     @property
     def datastack_name(self):
         return self._datastack_name
+
+
+def parametrized(dec):
+    """This decorator allows you to easily create decorators that take arguments"""
+    # REF: https://stackoverflow.com/questions/5929107/decorators-with-parameters
+
+    @wraps(dec)
+    def layer(*args, **kwargs):
+        @wraps(dec)
+        def repl(f):
+            return dec(f, *args, **kwargs)
+
+        return repl
+
+    return layer
+
+
+class ServerIncompatibilityError(Exception):
+    def __init__(self, message):
+        # for readability, wrap the message at 80 characters
+        message = textwrap.fill(message, width=80)
+        super().__init__(message)
+
+
+def _version_fails_constraint(version: Version, constraint: str = None):
+    if constraint is None:
+        return False
+    else:
+        specifier = SpecifierSet(constraint)
+        return version not in specifier
+
+
+@parametrized
+def _check_version_compatibility(
+    method: Callable, method_constraint: str = None, kwarg_use_constraints: dict = None
+) -> Callable:
+    """
+    This decorator is used to check the compatibility of features in the client and
+    server versions. If the server version is not compatible with the constraint, an
+    error will be raised.
+
+    Parameters
+    ----------
+    method
+        Method of the client to be decorated.
+    method_constraint
+        Version constraint for the method, described as a comparison operator
+        followed by the version number. For example, "<=1.0.0" would indicate that this
+        method is only compatible with server versions less than or equal to 1.0.0.
+    kwarg_use_constraints
+        Dictionary with some number of the method's keyword arguments as keys and
+        version constraints as values. Version constraints are described as a
+        comparison operator followed by the version number. For example, "<=1.0.0"
+        would indicate that the keyword argument is only compatible with server versions
+        less than or equal to 1.0.0. An error will be raised only if the user both
+        provides the keyword argument (even if passing in the default value!) and the
+        server version is not compatible with the constraint.
+
+    Raises
+    ------
+    ServerIncompatibilityError
+        If the server version is not compatible with the constraints.
+    """
+
+    @wraps(method)
+    def wrapper(*args, **kwargs):
+        self = args[0]
+
+        if method_constraint is not None:
+            if _version_fails_constraint(self.server_version, method_constraint):
+                msg = (
+                    f"Use of method `{method.__name__}` is only permitted "
+                    f"for server version {method_constraint}, your server "
+                    f"version is {self.server_version}. Contact your system "
+                    "administrator to update the server version."
+                )
+
+                raise ServerIncompatibilityError(msg)
+
+        for kwarg, kwarg_constraint in kwarg_use_constraints.items():
+            if _version_fails_constraint(self.server_version, kwarg_constraint):
+                msg = (
+                    f"Use of keyword argument `{kwarg}` in `{method.__name__}` "
+                    "is only permitted "
+                    f"for server version {kwarg_constraint}, your server "
+                    f"version is {self.server_version}. Contact your system "
+                    "administrator to update the server version."
+                )
+                raise ServerIncompatibilityError(msg)
+
+        out = method(*args, **kwargs)
+        return out
+
+    return wrapper
